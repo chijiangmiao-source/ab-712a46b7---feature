@@ -83,3 +83,111 @@ def test_bad_json(server):
 def test_unknown_route(server):
     status, _ = request(server, "GET", "/")
     assert status == 404
+
+
+def test_robust_audit_ok(server):
+    payload = {
+        "hits": [{"id": f"h{k}", "position": k} for k in range(4)],
+        "candidates": [
+            {
+                "id": "p",
+                "left_endpoint": "h0",
+                "right_endpoint": "h3",
+                "residual_low": 2,
+                "residual_high": 5,
+            },
+            {
+                "id": "q",
+                "left_endpoint": "h1",
+                "right_endpoint": "h2",
+                "residual_low": 5,
+                "residual_high": 2,
+            },
+        ],
+    }
+    status, body = request(server, "POST", "/audit/robust", payload)
+    assert status == 200
+    assert body["optimal_count"] == "1"
+    assert [p["id"] for p in body["canonical_pairs"]] == ["p", "q"]
+    assert (body["total_residual_low"], body["total_residual_high"]) == (7, 7)
+    pair = {p["id"]: p for p in body["canonical_pairs"]}
+    assert pair["p"]["residual_low"] == 2 and pair["p"]["residual_high"] == 5
+
+
+def test_robust_audit_error_shape_has_no_audit_fields(server):
+    payload = {
+        "hits": [{"id": f"h{k}", "position": k} for k in range(4)],
+        "candidates": [
+            {
+                "id": "x",
+                "left_endpoint": "h0",
+                "right_endpoint": "nope",
+                "residual_low": 0,
+                "residual_high": 1,
+            }
+        ],
+    }
+    status, body = request(server, "POST", "/audit/robust", payload)
+    assert status == 400
+    assert set(body.keys()) == {"errors"}
+    assert body["errors"][0]["field"] == "/candidates/0/right_endpoint"
+
+
+def test_robust_audit_requires_both_residuals(server):
+    payload = {
+        "hits": [{"id": f"h{k}", "position": k} for k in range(4)],
+        "candidates": [
+            {"id": "x", "left_endpoint": "h0", "right_endpoint": "h1", "residual": 3}
+        ],
+    }
+    status, body = request(server, "POST", "/audit/robust", payload)
+    assert status == 400
+    fields = {e["field"] for e in body["errors"]}
+    assert fields == {
+        "/candidates/0/residual_low",
+        "/candidates/0/residual_high",
+    }
+
+
+def test_legacy_audit_semantics_unchanged(server):
+    # 原入口仍只接受单 residual 字段，响应语义不变。
+    payload = {
+        "hits": [{"id": f"h{k}", "position": k} for k in range(4)],
+        "candidates": [
+            {"id": "p", "left_endpoint": "h0", "right_endpoint": "h3", "residual": 2},
+            {"id": "q", "left_endpoint": "h1", "right_endpoint": "h2", "residual": 1},
+        ],
+    }
+    status, body = request(server, "POST", "/audit", payload)
+    assert status == 200
+    assert body["total_residual"] == 3
+    assert set(body) == {
+        "optimal_count",
+        "paired_hits",
+        "total_residual",
+        "canonical_pairs",
+        "unmatched_hits",
+        "classification",
+    }
+    assert "residual" in body["canonical_pairs"][0]
+
+    # 原入口不接受双残差字段。
+    status, body = request(
+        server,
+        "POST",
+        "/audit",
+        {
+            "hits": [{"id": f"h{k}", "position": k} for k in range(4)],
+            "candidates": [
+                {
+                    "id": "x",
+                    "left_endpoint": "h0",
+                    "right_endpoint": "h1",
+                    "residual_low": 0,
+                    "residual_high": 0,
+                }
+            ],
+        },
+    )
+    assert status == 400
+    assert any(e["field"] == "/candidates/0/residual" for e in body["errors"])

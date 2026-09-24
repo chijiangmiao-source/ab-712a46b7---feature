@@ -1,11 +1,13 @@
 """硅微条击中配对审计 HTTP 服务（仅依赖 Python 标准库）。
 
 路由：
-* GET  /health   就绪探针；
-* POST /audit    提交 {hits, candidates}，返回配对审计结果。
+* GET  /health         就绪探针；
+* POST /audit          单增益工况审计：{hits, candidates}，候选携带单残差；
+* POST /audit/robust   双增益工况鲁棒审计：候选携带 residual_low /
+                       residual_high 两项残差，求不随工况改变的同一套配对。
 
-错误响应只包含 errors（每条带字段路径 field 与 message），不夹带任何审计字段。
-监听端口由环境变量 PORT 控制（默认 8080）。
+两个审计入口响应语义一致：错误响应只包含 errors（每条带字段路径 field 与
+message），不夹带任何审计字段。监听端口由环境变量 PORT 控制（默认 8080）。
 """
 
 from __future__ import annotations
@@ -15,10 +17,16 @@ import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from solver import ValidationError, audit
+from solver import ValidationError, audit, audit_robust
 
 SERVICE_NAME = "track-pair-audit"
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+# 路径 -> 审计求解器；两个入口的请求解析与错误处理完全一致。
+AUDIT_SOLVERS = {
+    "/audit": audit,
+    "/audit/robust": audit_robust,
+}
 
 
 class AuditHandler(BaseHTTPRequestHandler):
@@ -45,13 +53,17 @@ class AuditHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?")[0] != "/audit":
+        path = self.path.split("?")[0]
+        solver = AUDIT_SOLVERS.get(path)
+        if solver is None:
             self._write_json(
                 HTTPStatus.NOT_FOUND,
                 {"errors": [{"field": "", "message": f"未知路径: {self.path}"}]},
             )
             return
+        self._handle_audit(solver)
 
+    def _handle_audit(self, solver) -> None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -78,7 +90,7 @@ class AuditHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = audit(payload)
+            result = solver(payload)
         except ValidationError as exc:
             # 错误响应不夹带任何审计结果。
             self._write_json(HTTPStatus.BAD_REQUEST, {"errors": exc.errors})
